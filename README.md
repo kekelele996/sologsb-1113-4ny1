@@ -26,7 +26,7 @@ docker compose down
 | UI | MUI（Material UI 5）+ Emotion |
 | 路由 | React Router 6（5 条业务路由 + 404） |
 | 状态 | Zustand（targetStore / sessionStore / equipmentStore / nightStore） |
-| 存储 | IndexedDB（Dexie，库名 `gbobsplan-db`，`schemaVersion` + v2 迁移） |
+| 存储 | IndexedDB（Dexie，库名 `gbobsplan-db`，`schemaVersion` + v2/v3 迁移） |
 | 托管 | nginx:alpine（多阶段构建，SPA try_files + gzip） |
 
 ## 本地开发
@@ -55,7 +55,7 @@ npm run build    # 类型检查 + 生产构建
 │       ├── hooks/             # usePersistentStore（Dexie 读写 + Zustand 同步）/ useConflictCheck
 │       ├── pages/             # OverviewPage / TargetsPage / SessionsPage / EquipmentPage / ExportPage
 │       ├── router/index.tsx   # 路由表
-│       └── utils/             # astro.ts（高度角/可见窗口/月相）/ export.ts / id.ts
+│       └── utils/             # astro.ts（高度角/可见窗口/月相）/ replan.ts（替补安排预演）/ export.ts / id.ts
 ```
 
 ## 功能与路由
@@ -64,7 +64,7 @@ npm run build    # 类型检查 + 生产构建
 | --- | --- | --- |
 | `/` | 本夜编排总览 | 30 分钟刻度时间轴 + 月相与月出月落条带；冲突与低于高度阈值的目标自动标灰 |
 | `/targets` | 观测目标库 | 按类型与优先级筛选、按视星等排序、维护地平高度阈值与曝光参数，并给出本夜可见窗口 |
-| `/sessions` | 排程段与冲突 | 冲突检测结果、按时段/望远镜校验，勾选多条批量改期到备用观测夜并填写改期原因 |
+| `/sessions` | 排程段与冲突 | 冲突检测结果、按时段/望远镜校验；勾选「因云取消」段可在备用夜预演并生成替补安排，确认前显示可安排 / 设备冲突 / 无法安排数量，替补段标明来源、失败段写明高度 / 月相 / 设备原因，支持按来源追溯 |
 | `/equipment` | 设备分配视图 | 行 = 望远镜、列 = 30 分钟时段；冲突格标红，点击可一键跳转到对应排程段 |
 | `/export` | 导出观测清单 | 目标、时刻、滤镜、帧数导出为文本与 CSV，支持打印视图 |
 
@@ -72,5 +72,7 @@ npm run build    # 类型检查 + 生产构建
 
 - 全部数据存于浏览器 IndexedDB（Dexie，库名 `gbobsplan-db`），表：`targets`、`sessions`、`telescopes`、`instruments`、`nights`、`meta`。
 - `db.version(1).stores({...})` 声明索引；`db.version(2).upgrade(...)` 为排程段增加 `backupNightId` 索引，并给旧数据补齐 `schemaVersion` 与因云取消排程段的替补夜。
-- 首次打开且表为空时写入示例数据（12 个观测目标、5 个观测夜、4 台望远镜、4 台终端、14 段排程，含 1 处设备冲突与 1 条改期记录）。
+- `db.version(3).upgrade(...)` 为替补安排增加 `replanSourceSessionId` / `replanOutcome` / `replanNightId` 索引：可安排的段复制为备用夜排程并记录来源，冲突与无法安排的段保留「因云取消」并写入原因分类与明细，重新打开后可按来源查回。
+- 替补安排确认走单个 Dexie 读写事务（含设备占用二次校验），任一段不适合即整体回滚，页面与本地数据都保持确认前状态。
+- 首次打开且表为空时写入示例数据（13 个观测目标、5 个观测夜、4 台望远镜、4 台终端、24 段排程，含 1 处设备冲突、7 段因云取消与备用夜上已占用的排程）。
 - 容器无状态：不使用数据库服务、不挂载命名卷，`docker compose down` 后数据仍留在浏览器中。

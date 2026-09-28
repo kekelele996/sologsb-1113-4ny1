@@ -1,6 +1,12 @@
 /** 排程段状态 */
 export type SessionStatus = '待执行' | '进行中' | '已完成' | '因云取消';
 
+/** 替补安排的规划结论（确认前预演 / 确认后留痕共用） */
+export type ReplanOutcome = '可安排' | '冲突' | '无法安排';
+
+/** 无法安排的具体原因分类 */
+export type ReplanBlockReason = 'altitude' | 'moon' | 'equipment';
+
 /** 观测排程段 */
 export interface ObsSession {
   id: string;
@@ -26,6 +32,20 @@ export interface ObsSession {
   rescheduleReason?: string;
   /** 替补夜 ID（迁移时补齐） */
   backupNightId?: string;
+  /** 替补排程段：来源段 ID（因云取消段复制而来） */
+  replanSourceSessionId?: string;
+  /** 替补排程段：来源观测夜 ID（便于跨夜按来源追溯） */
+  replanSourceNightId?: string;
+  /** 替补排程段：规划说明（安排依据，如“21:50-23:30 可见，T-02 空闲”） */
+  replanNote?: string;
+  /** 取消段：最近一次替补规划的替补夜 ID */
+  replanNightId?: string;
+  /** 取消段：最近一次替补规划的结论 */
+  replanOutcome?: ReplanOutcome;
+  /** 取消段：无法安排 / 冲突的原因分类 */
+  replanBlockReason?: ReplanBlockReason;
+  /** 取消段：无法安排 / 冲突的具体说明（高度、月相或设备原因） */
+  replanDetail?: string;
   /** 数据结构版本 */
   schemaVersion: number;
 }
