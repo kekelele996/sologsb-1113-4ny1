@@ -1,7 +1,18 @@
 import { NIGHT_START_MINUTES, NIGHT_TOTAL_MINUTES, type ObsNight } from '../types/night';
-import type { ObsTarget } from '../types/target';
+import type { FilterName, ObsTarget } from '../types/target';
 
 export const DEG = Math.PI / 180;
+
+/** 窄带滤镜（月相偏高时优先安排窄带目标） */
+export const NARROWBAND_FILTERS: FilterName[] = ['Ha', 'OIII', 'SII'];
+
+/** 月相百分比达到该值即视为月相偏高，优先安排窄带目标 */
+export const HIGH_MOON_PHASE_PCT = 60;
+
+/** 目标是否使用窄带滤镜（受月光影响小） */
+export function isNarrowbandTarget(target: Pick<ObsTarget, 'filter'>): boolean {
+  return NARROWBAND_FILTERS.includes(target.filter);
+}
 
 /** 儒略日 */
 export function julianDate(date: Date): number {
@@ -50,6 +61,18 @@ export function minutesToTime(axis: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+/**
+ * 把日落 / 日出时刻夹到当夜时间轴区间 [0, NIGHT_TOTAL_MINUTES]：
+ * 日落可能略早于 18:00（如 17:39），此时应从 18:00 起算而非当成次日同一时刻。
+ */
+export function nightAxisBound(hhmm: string, isStart: boolean): number {
+  const axis = axisMinutes(hhmm);
+  if (axis >= NIGHT_TOTAL_MINUTES || axis < 0) {
+    return isStart ? 0 : NIGHT_TOTAL_MINUTES;
+  }
+  return axis;
+}
+
 /** 排程段时长（分钟，支持跨零点） */
 export function durationMinutes(startTime: string, endTime: string): number {
   const start = axisMinutes(startTime);
@@ -88,29 +111,79 @@ export interface VisibilityWindow {
   durationMinutes: number;
 }
 
+/** 连续可见区间（夜时间轴分钟，18:00 起算，endAxis 可超过 1440 表示跨零点） */
+export interface AltitudeRun {
+  startAxis: number;
+  endAxis: number;
+  maxAltitude: number;
+}
+
 /**
  * 本地计算目标的可见窗口：从日落到日出每 stepMinutes 采样地平高度角，
  * 取连续满足最小高度阈值的区间。
  */
 export function visibilityWindow(target: ObsTarget, night: ObsNight, stepMinutes = 10): VisibilityWindow | null {
-  const base = new Date(`${night.date}T18:00:00`);
-  const from = axisMinutes(night.sunset);
-  const to = axisMinutes(night.sunrise) || NIGHT_TOTAL_MINUTES;
-  const samples: Array<{ axis: number; altitude: number }> = [];
-  for (let axis = from; axis <= to; axis += stepMinutes) {
-    const date = new Date(base.getTime() + axis * 60_000);
-    samples.push({ axis, altitude: altitudeAt(target, date, night.siteLat, night.siteLng) });
-  }
-  const visible = samples.filter((sample) => sample.altitude >= target.minAltitude);
-  if (visible.length === 0) return null;
-  const startAxis = visible[0].axis;
-  const endAxis = visible[visible.length - 1].axis + stepMinutes;
+  const runs = altitudeRuns(target, night, stepMinutes);
+  if (runs.length === 0) return null;
+  // 窗口取所有可见区间的并集（夜间通常只有一段拱极区间除外）
+  const startAxis = runs[0].startAxis;
+  const endAxis = Math.min(runs[runs.length - 1].endAxis, nightAxisBound(night.sunrise, false));
   return {
     startText: minutesToTime(startAxis),
     endText: minutesToTime(endAxis),
-    maxAltitude: Number(Math.max(...visible.map((sample) => sample.altitude)).toFixed(1)),
+    maxAltitude: Number(Math.max(...runs.map((run) => run.maxAltitude)).toFixed(1)),
     durationMinutes: endAxis - startAxis,
   };
+}
+
+/** 夜时间轴上某一刻度对应的真实时刻（跨零点自动顺延到次日） */
+export function dateAtAxis(night: Pick<ObsNight, 'date'>, axis: number): Date {
+  return new Date(new Date(`${night.date}T18:00:00`).getTime() + axis * 60_000);
+}
+
+/**
+ * 从日落到日出逐点采样目标地平高度角；返回夜时间轴刻度与高度（度）数组，
+ * 轴刻度按区间顺序递增（跨零点会超过 1440）。
+ */
+export function sampleNightAltitudes(target: Pick<ObsTarget, 'raHours' | 'decDeg'>, night: ObsNight, stepMinutes = 10) {
+  const from = nightAxisBound(night.sunset, true);
+  const to = nightAxisBound(night.sunrise, false);
+  const samples: Array<{ axis: number; altitude: number }> = [];
+  for (let axis = from; axis <= to; axis += stepMinutes) {
+    samples.push({ axis, altitude: altitudeAt(target, dateAtAxis(night, axis), night.siteLat, night.siteLng) });
+  }
+  return samples;
+}
+
+/**
+ * 目标在观测夜上所有连续满足最小地平高度阈值的区间（跨零点安全），
+ * 供替补安排在区间内寻找望远镜空闲时段。
+ */
+export function altitudeRuns(target: ObsTarget, night: ObsNight, stepMinutes = 10): AltitudeRun[] {
+  const samples = sampleNightAltitudes(target, night, stepMinutes);
+  const runs: AltitudeRun[] = [];
+  let startAxis: number | null = null;
+  let maxAltitude = -Infinity;
+  samples.forEach((sample, index) => {
+    if (sample.altitude >= target.minAltitude) {
+      if (startAxis === null) startAxis = sample.axis;
+      maxAltitude = Math.max(maxAltitude, sample.altitude);
+    }
+    const sampleInside = samples[index + 1] ? samples[index + 1].altitude >= target.minAltitude : false;
+    if (startAxis !== null && !sampleInside) {
+      runs.push({ startAxis, endAxis: sample.axis + stepMinutes, maxAltitude: Number(maxAltitude.toFixed(1)) });
+      startAxis = null;
+      maxAltitude = -Infinity;
+    }
+  });
+  return runs;
+}
+
+/** 观测夜上目标达到的最大地平高度角（度，无视阈值） */
+export function maxNightAltitude(target: Pick<ObsTarget, 'raHours' | 'decDeg'>, night: ObsNight, stepMinutes = 10): number {
+  const samples = sampleNightAltitudes(target, night, stepMinutes);
+  if (samples.length === 0) return -90;
+  return Number(Math.max(...samples.map((sample) => sample.altitude)).toFixed(1));
 }
 
 /** 是否低于最小地平高度角阈值（低于阈值排程时自动标灰） */
